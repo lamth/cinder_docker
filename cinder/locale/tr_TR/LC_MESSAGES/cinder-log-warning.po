@@ -7,9 +7,9 @@
 # OpenStack Infra <zanata@openstack.org>, 2015. #zanata
 msgid ""
 msgstr ""
-"Project-Id-Version: cinder 7.0.1.dev5\n"
+"Project-Id-Version: cinder 8.0.0.dev66\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2015-10-23 06:07+0000\n"
+"POT-Creation-Date: 2015-10-22 06:07+0000\n"
 "PO-Revision-Date: 2015-08-26 03:31+0000\n"
 "Last-Translator: openstackjenkins <jenkins@openstack.org>\n"
 "Language-Team: Turkish (Turkey)\n"
@@ -232,16 +232,6 @@ msgid "Delete temp LUN after migration start failed. LUN: %s"
 msgstr "Göç başladıktan sonra geçici LUN silme başarısız. LUN: %s"
 
 #, python-format
-msgid ""
-"Delete the temporary cgsnapshot %(name)s failed. This temporary cgsnapshot "
-"can be deleted manually. Consistency group %(cg)s is created successfully "
-"from cgsnapshot %(cgsnapshot)s. Message: %(msg)s"
-msgstr ""
-"Geçici cgsnapshot %(name)s silinmesi başarısız. Geçici cgsnapshot elle "
-"silinebilir. Tutarlılık grubu %(cg)s %(cgsnapshot)s cgsnapshot'ından "
-"başarıyla oluşturuldu. İleti: %(msg)s"
-
-#, python-format
 msgid "Delete volume id not found. Removing from cinder: %(id)s Ex: %(msg)s"
 msgstr ""
 "Mantıksal sürücü kimliği sil bulunamadı. Cinder'den kaldırılıyor: %(id)s "
@@ -265,12 +255,6 @@ msgstr ""
 msgid "Detected snapshot stuck in creating status, setting to ERROR."
 msgstr ""
 "Oluşturma durumunda kalmış anlık görüntü algılandı, HATA olarak ayarlanıyor."
-
-#, python-format
-msgid "Detected volume stuck in %s(curr_status)s status, setting to ERROR."
-msgstr ""
-"%s(curr_status)s durumunda sıkışıp kalmış mantıksal sürücü algılandı, HATA "
-"olarak ayarlanıyor."
 
 msgid "Discover file retries exhausted."
 msgstr "Dosya keşfi yeniden denemeleri tükendi."
@@ -464,14 +448,6 @@ msgid "Failed to extract initiators of %s, so ignore deregistration operation."
 msgstr ""
 "%s ilklendiricilerinin çıkarılması başarısız, kayıt silme işlemini göz ardı "
 "et."
-
-#, python-format
-msgid ""
-"Failed to find CHAP auth from config for %(vol_id)s. Config file %(conf)s "
-"does not exist."
-msgstr ""
-"%(vol_id)s için yapılandırmadan CHAP yetkilendirme bulma başarısız. %(conf)s "
-"yapılandırma dosyası mevcut değil."
 
 msgid "Failed to get Raid Snapshot ID and did not store in snapshot."
 msgstr ""
@@ -1215,14 +1191,6 @@ msgstr ""
 "bu komut satırından bir Retype üzerinde gerçekleşir: cinder --os-volume-api-"
 "version 2 retype <volumeId> <volumeType> --migration-policy on-demand"
 
-msgid ""
-"The VMware ESX VMDK driver is now deprecated and will be removed in the Juno "
-"release. The VMware vCenter VMDK driver will remain and continue to be "
-"supported."
-msgstr ""
-"VMware ESX VMDK sürücüsü artık kullanılmıyor ve Juno sürümüyle kaldırılacak. "
-"VMware vCenter VMDK sürücüsü kalacak ve desteklenmeye devam edilecek."
-
 #, python-format
 msgid ""
 "The following specified storage pools do not exist: %(unexist)s. This host "
@@ -1481,13 +1449,6 @@ msgstr ""
 "değil."
 
 #, python-format
-msgid ""
-"Volume: %(volumeName)s is already part of storage group %(sgGroupName)s."
-msgstr ""
-"Mantıksal sürücü: %(volumeName)s zaten %(sgGroupName)s depolama grubunun "
-"parçası."
-
-#, python-format
 msgid "Volume: %(volumeName)s is not currently belonging to any storage group."
 msgstr ""
 "Mantıksal sürücü: %(volumeName)s şu an herhangi bir depolama grubuna ait "
@@ -1608,9 +1569,6 @@ msgstr "anlık görüntü: %s bulunamadı, silme işlemleri atlanıyor"
 
 msgid "ssc job in progress. Returning... "
 msgstr "ssc işi sürüyor. Dönülüyor... "
-
-msgid "swift error while listing objects, continuing with delete."
-msgstr "nesneler listelenirken swift hatası, silme ile devam ediliyor."
 
 msgid "terminate_conn: provider location empty."
 msgstr "terminate_conn: sağlayıcı konumu boş."

@@ -17,7 +17,6 @@
 LVM class for performing LVM operations.
 """
 
-import itertools
 import math
 import os
 import re
@@ -26,6 +25,7 @@ from os_brick import executor
 from oslo_concurrency import processutils as putils
 from oslo_log import log as logging
 from oslo_utils import excutils
+from six import moves
 
 from cinder import exception
 from cinder.i18n import _LE, _LI
@@ -71,6 +71,15 @@ class LVM(executor.Executor):
         self._supports_lvchange_ignoreskipactivation = None
         self.vg_provisioned_capacity = 0.0
 
+        # Ensure LVM_SYSTEM_DIR has been added to LVM.LVM_CMD_PREFIX
+        # before the first LVM command is executed, and use the directory
+        # where the specified lvm_conf file is located as the value.
+        if lvm_conf and os.path.isfile(lvm_conf):
+            lvm_sys_dir = os.path.dirname(lvm_conf)
+            LVM.LVM_CMD_PREFIX = ['env',
+                                  'LC_ALL=C',
+                                  'LVM_SYSTEM_DIR=' + lvm_sys_dir]
+
         if create_vg and physical_volumes is not None:
             self.pv_list = physical_volumes
 
@@ -104,10 +113,6 @@ class LVM(executor.Executor):
             self.vg_thin_pool = pool_name
             self.activate_lv(self.vg_thin_pool)
         self.pv_list = self.get_all_physical_volumes(root_helper, vg_name)
-        if lvm_conf and os.path.isfile(lvm_conf):
-            LVM.LVM_CMD_PREFIX = ['env',
-                                  'LC_ALL=C',
-                                  'LVM_SYSTEM_DIR=/etc/cinder']
 
     def _vg_exists(self):
         """Simple check to see if VG exists.
@@ -287,7 +292,8 @@ class LVM(executor.Executor):
         lv_list = []
         if out is not None:
             volumes = out.split()
-            for vg, name, size in itertools.izip(*[iter(volumes)] * 3):
+            iterator = moves.zip(*[iter(volumes)] * 3)  # pylint: disable=E1101
+            for vg, name, size in iterator:
                 lv_list.append({"vg": vg, "name": name, "size": size})
 
         return lv_list

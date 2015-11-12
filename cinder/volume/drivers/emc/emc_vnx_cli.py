@@ -65,18 +65,15 @@ loc_opts = [
                default='global',
                help='VNX authentication scope type.'),
     cfg.StrOpt('storage_vnx_security_file_dir',
-               default=None,
                help='Directory path that contains the VNX security file. '
                'Make sure the security file is generated first.'),
     cfg.StrOpt('naviseccli_path',
                default='',
                help='Naviseccli Path.'),
     cfg.StrOpt('storage_vnx_pool_names',
-               default=None,
                deprecated_name='storage_vnx_pool_name',
                help='Comma-separated list of storage pool names to be used.'),
     cfg.StrOpt('san_secondary_ip',
-               default=None,
                help='VNX secondary SP IP Address.'),
     cfg.IntOpt('default_timeout',
                default=60 * 24 * 365,
@@ -713,22 +710,6 @@ class CommandLineHelper(object):
                                                   'cg_name': cg_name})
             self._raise_cli_error(add_lun_to_cg_cmd, rc, out)
 
-        def add_lun_to_consistency_success():
-            data = self.get_consistency_group_by_name(cg_name)
-            if str(lun_id) in data['Luns']:
-                LOG.debug("Add lun %(lun)s to consistency "
-                          "group %(cg_name)s successfully.",
-                          {'lun': lun_id, 'cg_name': cg_name})
-                return True
-            else:
-                LOG.debug("Adding lun %(lun)s to consistency "
-                          "group %(cg_name)s.",
-                          {'lun': lun_id, 'cg_name': cg_name})
-                return False
-
-        self._wait_for_a_condition(add_lun_to_consistency_success,
-                                   interval=INTERVAL_30_SEC)
-
     def remove_luns_from_consistencygroup(self, cg_name, remove_ids,
                                           poll=False):
         """Removes LUN(s) from cg"""
@@ -775,10 +756,8 @@ class CommandLineHelper(object):
             LOG.info(_LI('Consistency group %s was deleted '
                          'successfully.'), cg_name)
 
-    def create_cgsnapshot(self, cgsnapshot):
+    def create_cgsnapshot(self, cg_name, snap_name):
         """Create a cgsnapshot (snap group)."""
-        cg_name = cgsnapshot['consistencygroup_id']
-        snap_name = cgsnapshot['id']
         create_cg_snap_cmd = ('-np', 'snap', '-create',
                               '-res', cg_name,
                               '-resType', 'CG',
@@ -1766,7 +1745,7 @@ class CommandLineHelper(object):
 class EMCVnxCliBase(object):
     """This class defines the functions to use the native CLI functionality."""
 
-    VERSION = '06.00.00'
+    VERSION = '07.00.00'
     stats = {'driver_version': VERSION,
              'storage_protocol': None,
              'vendor_name': 'EMC',
@@ -2280,17 +2259,24 @@ class EMCVnxCliBase(object):
             self._get_and_validate_extra_specs(new_specs))
 
         # Check what changes are needed
-        migration, tiering_change = self.determine_changes_when_retype(
-            volume, new_type, host)
+        changes = self.determine_changes_when_retype(volume, new_type, host)
 
-        # Reject if volume has snapshot when migration is needed
-        if migration and self._client.check_lun_has_snap(
-                self.get_lun_id(volume)):
-            LOG.debug('Driver is not able to do retype because the volume '
-                      'has snapshot which is forbidden to migrate.')
-            return False
+        if self._client.check_lun_has_snap(self.get_lun_id(volume)):
+            # Reject if volume has snapshot when migration is needed
+            if changes['migration']:
+                LOG.debug('Driver is not able to do retype because the volume '
+                          '%s has a snapshot which is forbidden to migrate.',
+                          volume['id'])
+                return False
+            # Reject if volume has snapshot when trying to
+            # turn on compression
+            if changes['compression_on']:
+                LOG.debug('Driver is not able to do retype because the volume '
+                          '%s has a snapshot which is forbidden to turn on '
+                          'compression.', volume['id'])
+                return False
 
-        if migration:
+        if changes['migration']:
             # Check whether the migration is valid
             is_valid, target_pool_name = (
                 self._is_valid_for_storage_assisted_migration(
@@ -2310,16 +2296,21 @@ class EMCVnxCliBase(object):
                           'storage-assisted migration is not valid '
                           'in this situation.')
                 return False
-        elif tiering_change:
+        if changes['compression_on']:
+            # Turn on compression feature on the volume
+            self._client.enable_or_disable_compression_on_lun(
+                volume['name'], 'on')
+        if changes['tiering']:
             # Modify lun to change tiering policy
             self._client.modify_lun_tiering(volume['name'], new_tiering)
-            return True
-        else:
-            return True
+        return True
 
     def determine_changes_when_retype(self, volume, new_type, host):
-        migration = False
-        tiering_change = False
+        changes = {
+            'migration': False,
+            'tiering': False,
+            'compression_on': False
+        }
 
         old_specs = self.get_volumetype_extraspecs(volume)
         old_provisioning, old_tiering, old_snapcopy = (
@@ -2332,15 +2323,20 @@ class EMCVnxCliBase(object):
         lun_type = self._extract_provider_location_for_lun(
             volume['provider_location'], 'type')
 
-        if volume['host'] != host['host'] or \
-                old_provisioning != new_provisioning:
-            migration = True
+        if volume['host'] != host['host']:
+            changes['migration'] = True
+        elif old_provisioning != new_provisioning:
+            if (old_provisioning in ['thin', 'thick'] and
+                    new_provisioning == 'compressed'):
+                changes['compression_on'] = True
+            else:
+                changes['migration'] = True
         if lun_type == 'smp':
-            migration = True
+            changes['migration'] = True
 
         if new_tiering != old_tiering:
-            tiering_change = True
-        return migration, tiering_change
+            changes['tiering'] = True
+        return changes
 
     def determine_all_enablers_exist(self, enablers):
         """Determine all wanted enablers whether exist."""
@@ -2765,7 +2761,8 @@ class EMCVnxCliBase(object):
                  {'group_name': cgsnapshot['consistencygroup_id']})
 
         try:
-            self._client.create_cgsnapshot(cgsnapshot)
+            self._client.create_cgsnapshot(cgsnapshot['consistencygroup_id'],
+                                           cgsnapshot['id'])
             for snapshot in snapshots:
                 snapshot['status'] = 'available'
         except Exception:
@@ -3453,17 +3450,49 @@ class EMCVnxCliBase(object):
         pass
 
     def create_consistencygroup_from_src(self, context, group, volumes,
-                                         cgsnapshot=None, snapshots=None):
+                                         cgsnapshot=None, snapshots=None,
+                                         source_cg=None, source_vols=None):
         """Creates a consistency group from cgsnapshot."""
+        if cgsnapshot and snapshots and not source_cg:
+            return self._create_consisgroup_from_cgsnapshot(
+                group, volumes, cgsnapshot, snapshots)
+        elif source_cg and source_vols and not cgsnapshot:
+            return self._clone_consisgroup(
+                group, volumes, source_cg, source_vols)
+        else:
+            msg = _("create_consistencygroup_from_src supports a "
+                    "cgsnapshot source or a consistency group source. "
+                    "Multiple sources cannot be used.")
+            raise exception.InvalidInput(reason=msg)
 
-        if not cgsnapshot or not snapshots:
-            msg = _("create_consistencygroup_from_src only supports a "
-                    "cgsnapshot source, other sources cannot be used.")
-            raise exception.InvalidInput(msg)
+    def _clone_consisgroup(self, group, volumes, source_cg, source_vols):
+        temp_cgsnapshot_name = 'temp_snapshot_for_{}'.format(group.id)
+        store_spec = {
+            'group': group,
+            'snapshot': {'id': temp_cgsnapshot_name,
+                         'consistencygroup_id': source_cg.id},
+            'snap_name': temp_cgsnapshot_name,
+            'source_lun_id': None,
+            'client': self._client
+        }
+        flow_name = 'clone_consisgroup'
+        snap_build_tasks = [CreateSnapshotTask()]
 
-        flow_name = 'create_consistencygroup_from_cgsnapshot'
-        work_flow = linear_flow.Flow(flow_name)
-        copied_snapshot_name = 'temp_snapshot_for_%s' % group['id']
+        volume_model_updates = self._create_cg_from_cgsnap_use_workflow(
+            flow_name, snap_build_tasks, store_spec,
+            volumes, source_vols)
+
+        self._delete_temp_cgsnap(temp_cgsnapshot_name)
+
+        LOG.info(_LI('Consistency group %(cg)s is created successfully.'),
+                 {'cg': group.id})
+
+        return None, volume_model_updates
+
+    def _create_consisgroup_from_cgsnapshot(self, group, volumes,
+                                            cgsnapshot, snapshots):
+        flow_name = 'create_consisgroup_from_cgsnapshot'
+        copied_snapshot_name = 'temp_snapshot_for_%s' % group.id
         store_spec = {
             'group': group,
             'src_snap_name': cgsnapshot['id'],
@@ -3471,29 +3500,55 @@ class EMCVnxCliBase(object):
             'client': self._client
         }
 
-        work_flow.add(CopySnapshotTask(),
-                      AllowReadWriteOnSnapshotTask())
+        snap_build_tasks = [CopySnapshotTask(),
+                            AllowReadWriteOnSnapshotTask()]
 
+        src_vols = map(lambda snap: snap.volume, snapshots)
+
+        volume_model_updates = self._create_cg_from_cgsnap_use_workflow(
+            flow_name, snap_build_tasks, store_spec, volumes, src_vols)
+
+        self._delete_temp_cgsnap(copied_snapshot_name)
+
+        LOG.info(_LI('Consistency group %(cg)s is created successfully.'),
+                 {'cg': group.id})
+
+        return None, volume_model_updates
+
+    def _delete_temp_cgsnap(self, snap):
+        try:
+            self._client.delete_cgsnapshot(snap)
+        except exception.EMCVnxCLICmdError as ex:
+            LOG.warning(_LW('Delete the temporary cgsnapshot %(name)s failed. '
+                            'This temporary cgsnapshot can be deleted '
+                            'manually. '
+                            'Message: %(msg)s'),
+                        {'name': snap,
+                         'msg': ex.kwargs['out']})
+
+    def _create_cg_from_cgsnap_use_workflow(self, flow_name, snap_build_tasks,
+                                            store_spec, volumes, source_vols):
+        work_flow = linear_flow.Flow(flow_name)
+        work_flow.add(*snap_build_tasks)
         # Add tasks for each volumes in the consistency group
         lun_id_key_template = 'new_lun_id_%s'
         lun_data_key_template = 'vol_%s'
         volume_model_updates = []
 
-        for i, (volume, snap) in enumerate(zip(volumes, snapshots)):
+        for i, (volume, src_volume) in enumerate(zip(volumes, source_vols)):
             specs = self.get_volumetype_extraspecs(volume)
-            provisioning, tiering, snapcopy = (
+            provisioning, tiering, snap_copy = (
                 self._get_and_validate_extra_specs(specs))
-            pool_name = self. get_target_storagepool(volume, snap['volume'])
+            pool_name = self.get_target_storagepool(volume, src_volume)
             sub_store_spec = {
                 'volume': volume,
-                'source_vol_name': snap['volume_name'],
+                'source_vol_name': src_volume['name'],
                 'pool_name': pool_name,
                 'dest_vol_name': volume['name'] + '_dest',
                 'volume_size': volume['size'],
                 'provisioning': provisioning,
                 'tiering': tiering,
                 'ignore_pool_full_threshold': self.ignore_pool_full_threshold,
-                'snapcopy': snapcopy
             }
             work_flow.add(
                 CreateSMPTask(name="CreateSMPTask%s" % i,
@@ -3524,26 +3579,11 @@ class EMCVnxCliBase(object):
         flow_engine = taskflow.engines.load(work_flow, store=store_spec)
         flow_engine.run()
 
-        # Delete copied snapshot
-        try:
-            self._client.delete_cgsnapshot(copied_snapshot_name)
-        except exception.EMCVnxCLICmdError as ex:
-            LOG.warning(_LW('Delete the temporary cgsnapshot %(name)s failed. '
-                            'This temporary cgsnapshot can be deleted '
-                            'manually. Consistency group %(cg)s is created '
-                            'successfully from cgsnapshot %(cgsnapshot)s. '
-                            'Message: %(msg)s'),
-                        {'name': copied_snapshot_name,
-                         'cg': group['id'],
-                         'cgsnapshot': cgsnapshot['id'],
-                         'msg': ex.kwargs['out']})
-
         for i, update in enumerate(volume_model_updates):
             new_lun_id = flow_engine.storage.fetch(lun_id_key_template % i)
             update['provider_location'] = (
                 self._build_provider_location(new_lun_id))
-
-        return None, volume_model_updates
+        return volume_model_updates
 
     def get_target_storagepool(self, volume, source_volume=None):
         pool = vol_utils.extract_host(volume['host'], 'pool')
@@ -3649,7 +3689,7 @@ class AttachSnapTask(task.Task):
 
     Reversion strategy: Detach the SMP.
     """
-    def execute(self, client, volume, snapcopy, snap_name,
+    def execute(self, client, volume, snap_name,
                 *args, **kwargs):
         LOG.debug('AttachSnapTask.execute')
         client.attach_mount_point(volume['name'], snap_name)
@@ -3749,7 +3789,8 @@ class CreateSnapshotTask(task.Task):
         LOG.debug('CreateSnapshotTask.execute')
         # Create temp Snapshot
         if snapshot['consistencygroup_id']:
-            client.create_cgsnapshot(snapshot)
+            client.create_cgsnapshot(snapshot['consistencygroup_id'],
+                                     snapshot['id'])
         else:
             snapshot_name = snapshot['name']
             volume_name = snapshot['volume_name']

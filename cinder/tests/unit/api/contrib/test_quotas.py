@@ -300,6 +300,18 @@ class QuotaSetsControllerTest(test.TestCase):
         self.assertRaises(webob.exc.HTTPForbidden, self.controller.update,
                           self.req, self.B.id, body)
 
+    def test_update_subproject_quota_when_parent_has_default_quotas(self):
+        self.controller._get_project = mock.Mock()
+        self.controller._get_project.side_effect = self._get_project
+        # Since the quotas of the project A were not updated, it will have
+        # default quotas.
+        self.req.environ['cinder.context'].project_id = self.A.id
+        # Update the project B quota.
+        expected = make_body(gigabytes=1000, snapshots=10,
+                             volumes=5, backups=5, tenant_id=None)
+        result = self.controller.update(self.req, self.B.id, expected)
+        self.assertDictMatch(expected, result)
+
     @mock.patch(
         'cinder.api.openstack.wsgi.Controller.validate_string_length')
     @mock.patch(
@@ -459,6 +471,34 @@ class QuotaSetsControllerTest(test.TestCase):
 
         result_show_after = self.controller.show(self.req, self.A.id)
         self.assertDictMatch(result_show, result_show_after)
+
+    def test_subproject_delete_not_considering_default_quotas(self):
+        """Test delete subprojects' quotas won't consider default quotas.
+
+        Test plan:
+        - Update the volume quotas of project A
+        - Update the volume quotas of project B
+        - Delete the quotas of project B
+
+        Resources with default quotas aren't expected to be considered when
+        updating the allocated values of the parent project. Thus, the delete
+        operation should succeed.
+        """
+        self.controller._get_project = mock.Mock()
+        self.controller._get_project.side_effect = self._get_project
+        self.req.environ['cinder.context'].project_id = self.A.id
+
+        body = {'quota_set': {'volumes': 5}}
+        result = self.controller.update(self.req, self.A.id, body)
+        self.assertEqual(body['quota_set']['volumes'],
+                         result['quota_set']['volumes'])
+
+        body = {'quota_set': {'volumes': 2}}
+        result = self.controller.update(self.req, self.B.id, body)
+        self.assertEqual(body['quota_set']['volumes'],
+                         result['quota_set']['volumes'])
+
+        self.controller.delete(self.req, self.B.id)
 
     def test_delete_with_allocated_quota_different_from_zero(self):
         self.controller._get_project = mock.Mock()

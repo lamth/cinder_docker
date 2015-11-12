@@ -46,7 +46,6 @@ LOG = logging.getLogger(__name__)
 
 PURE_OPTS = [
     cfg.StrOpt("pure_api_token",
-               default=None,
                help="REST API authorization token."),
 ]
 
@@ -71,7 +70,7 @@ def log_debug_trace(f):
     def wrapper(*args, **kwargs):
         cls_name = args[0].__class__.__name__
         method_name = "%(cls_name)s.%(method)s" % {"cls_name": cls_name,
-                                                   "method": f.func_name}
+                                                   "method": f.__name__}
         LOG.debug("Enter " + method_name)
         result = f(*args, **kwargs)
         LOG.debug("Leave " + method_name)

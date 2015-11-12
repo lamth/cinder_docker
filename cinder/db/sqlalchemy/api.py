@@ -25,7 +25,6 @@ import sys
 import threading
 import time
 import uuid
-import warnings
 
 from oslo_config import cfg
 from oslo_db import exception as db_exc
@@ -46,6 +45,7 @@ from sqlalchemy.sql.expression import desc
 from sqlalchemy.sql.expression import literal_column
 from sqlalchemy.sql.expression import true
 from sqlalchemy.sql import func
+from sqlalchemy.sql import sqltypes
 
 from cinder.api import common
 from cinder.common import sqlalchemyutils
@@ -108,8 +108,8 @@ def get_backend():
 def is_admin_context(context):
     """Indicates if the request context is an administrator."""
     if not context:
-        warnings.warn(_('Use of empty request context is deprecated'),
-                      DeprecationWarning)
+        LOG.warning(_LW('Use of empty request context is deprecated'),
+                    DeprecationWarning)
         raise Exception('die')
     return context.is_admin
 
@@ -410,15 +410,16 @@ def _service_get_all_topic_subquery(context, session, topic, subq, label):
 
 @require_admin_context
 def service_get_by_args(context, host, binary):
-    result = model_query(context, models.Service).\
+    results = model_query(context, models.Service).\
         filter_by(host=host).\
         filter_by(binary=binary).\
-        first()
+        all()
 
-    if not result:
-        raise exception.HostBinaryNotFound(host=host, binary=binary)
+    for result in results:
+        if host == result['host']:
+            return result
 
-    return result
+    raise exception.HostBinaryNotFound(host=host, binary=binary)
 
 
 @require_admin_context
@@ -563,11 +564,13 @@ def quota_allocated_get_all_by_project(context, project_id):
 
 
 @require_admin_context
-def quota_create(context, project_id, resource, limit):
+def quota_create(context, project_id, resource, limit, allocated):
     quota_ref = models.Quota()
     quota_ref.project_id = project_id
     quota_ref.resource = resource
     quota_ref.hard_limit = limit
+    if allocated:
+        quota_ref.allocated = allocated
 
     session = get_session()
     with session.begin():
@@ -1102,6 +1105,18 @@ def volume_create(context, values):
         session.add(volume_ref)
 
     return _volume_get(context, values['id'], session=session)
+
+
+def get_booleans_for_table(table_name):
+    booleans = set()
+    table = getattr(models, table_name.capitalize())
+    if hasattr(table, '__table__'):
+        columns = table.__table__.columns
+        for column in columns:
+            if isinstance(column.type, sqltypes.Boolean):
+                booleans.add(column.name)
+
+    return booleans
 
 
 @require_admin_context
@@ -2248,6 +2263,8 @@ def snapshot_get_all_by_project(context, project_id, filters=None, marker=None,
     # No snapshots would match, return empty list
     if not query:
         return []
+
+    query = query.options(joinedload('snapshot_metadata'))
     return query.all()
 
 
@@ -2284,6 +2301,7 @@ def snapshot_get_active_by_window(context, begin, end=None, project_id=None):
     query = query.filter(or_(models.Snapshot.deleted_at == None,  # noqa
                              models.Snapshot.deleted_at > begin))
     query = query.options(joinedload(models.Snapshot.volume))
+    query = query.options(joinedload('snapshot_metadata'))
     if end:
         query = query.filter(models.Snapshot.created_at < end)
     if project_id:
@@ -3202,8 +3220,8 @@ def volume_type_encryption_update(context, volume_type_id, values):
                                                 session)
 
         if not encryption:
-            raise exception.VolumeTypeEncryptionNotFound(type_id=
-                                                         volume_type_id)
+            raise exception.VolumeTypeEncryptionNotFound(
+                type_id=volume_type_id)
 
         encryption.update(values)
 
@@ -3259,6 +3277,17 @@ def volume_glance_metadata_get_all(context):
     """Return the Glance metadata for all volumes."""
 
     return _volume_glance_metadata_get_all(context)
+
+
+@require_context
+def volume_glance_metadata_list_get(context, volume_id_list):
+    """Return the glance metadata for a volume list."""
+    query = model_query(context,
+                        models.VolumeGlanceMetadata,
+                        session=None)
+    query = query.filter(
+        models.VolumeGlanceMetadata.volume_id.in_(volume_id_list))
+    return query.all()
 
 
 @require_context

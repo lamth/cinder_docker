@@ -12,7 +12,7 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
-import urllib
+from six.moves import urllib
 
 from cinder import exception
 from cinder.tests.unit.volume.drivers.emc import scaleio
@@ -30,8 +30,8 @@ class TestMisc(scaleio.TestScaleIODriver):
         """
         super(TestMisc, self).setUp()
 
-        self.domain_name_enc = urllib.quote(self.DOMAIN_NAME)
-        self.pool_name_enc = urllib.quote(self.POOL_NAME)
+        self.domain_name_enc = urllib.parse.quote(self.DOMAIN_NAME)
+        self.pool_name_enc = urllib.parse.quote(self.POOL_NAME)
 
         self.HTTPS_MOCK_RESPONSES = {
             self.RESPONSE_MODE.Valid: {
@@ -81,6 +81,12 @@ class TestMisc(scaleio.TestScaleIODriver):
     def test_both_domain(self):
         self.driver.protection_domain_name = "test_domain_name"
         self.driver.protection_domain_id = "test_domain_id"
+        self.assertRaises(exception.InvalidInput,
+                          self.driver.check_for_setup_error)
+
+    def test_no_storage_pools(self):
+        """No storage pools."""
+        self.driver.storage_pools = None
         self.assertRaises(exception.InvalidInput,
                           self.driver.check_for_setup_error)
 

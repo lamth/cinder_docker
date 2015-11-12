@@ -22,6 +22,7 @@ import six
 from cinder import context
 from cinder import exception
 from cinder import test
+from cinder.tests.unit import fake_consistencygroup
 from cinder.tests.unit import fake_snapshot
 from cinder.tests.unit import fake_volume
 from cinder.tests.unit import utils
@@ -594,6 +595,11 @@ class EMCVNXCLIDriverTestData(object):
     def ALLOW_READWRITE_ON_SNAP_CMD(self, snap_name):
         return ('snap', '-modify', '-id', snap_name,
                 '-allowReadWrite', 'yes', '-allowAutoDelete', 'yes')
+
+    def MODIFY_TIERING_CMD(self, lun_name, tiering):
+        cmd = ['lun', '-modify', '-name', lun_name, '-o']
+        cmd.extend(self.tiering_values[tiering])
+        return tuple(cmd)
 
     provisioning_values = {
         'thin': ['-type', 'Thin'],
@@ -3045,15 +3051,10 @@ Time Remaining:  0 second(s)
     @mock.patch(
         "cinder.volume.volume_types."
         "get_volume_type_extra_specs",
-        mock.Mock(return_value={'storagetype:provisioning': 'thin'}))
-    def test_retype_thin_to_compressed_auto(self):
-        """Unit test for retype thin to compressed and auto tiering."""
-        diff_data = {'encryption': {}, 'qos_specs': {},
-                     'extra_specs':
-                     {'storagetype:provsioning': ('thin',
-                                                  'compressed'),
-                      'storagetype:tiering': (None, 'auto')}}
-
+        mock.Mock(side_effect=[{'provisioning:type': 'thin'},
+                               {'provisioning:type': 'thick'}]))
+    def test_retype_turn_on_compression_and_autotiering(self):
+        """Unit test for retype a volume to compressed and auto tiering."""
         new_type_data = {'name': 'voltype0', 'qos_specs_id': None,
                          'deleted': False,
                          'extra_specs': {'storagetype:provisioning':
@@ -3061,20 +3062,15 @@ Time Remaining:  0 second(s)
                                          'storagetype:tiering': 'auto'},
                          'id': 'f82f28c8-148b-416e-b1ae-32d3c02556c0'}
 
-        host_test_data = {'host': 'ubuntu-server12@pool_backend_1',
+        host_test_data = {'host': 'host@backendsec#unit_test_pool',
                           'capabilities':
                           {'location_info': 'unit_test_pool|FNM00124500890',
                            'volume_backend_name': 'pool_backend_1',
                            'storage_protocol': 'iSCSI'}}
-        cmd_migrate_verify = self.testData.MIGRATION_VERIFY_CMD(1)
-        output_migrate_verify = (r'The specified source LUN '
-                                 'is not currently migrating', 23)
         commands = [self.testData.NDU_LIST_CMD,
-                    self.testData.SNAP_LIST_CMD(),
-                    cmd_migrate_verify]
+                    self.testData.SNAP_LIST_CMD()]
         results = [self.testData.NDU_LIST_RESULT,
-                   ('No snap', 1023),
-                   output_migrate_verify]
+                   ('No snap', 1023)]
         fake_cli = self.driverSetup(commands, results)
         self.driver.cli.enablers = ['-Compression',
                                     '-Deduplication',
@@ -3082,20 +3078,68 @@ Time Remaining:  0 second(s)
                                     '-FAST']
         emc_vnx_cli.CommandLineHelper.get_array_serial = mock.Mock(
             return_value={'array_serial': "FNM00124500890"})
-
+        # Retype a thin volume to a compressed volume
         self.driver.retype(None, self.testData.test_volume3,
-                           new_type_data,
-                           diff_data,
-                           host_test_data)
+                           new_type_data, None, host_test_data)
         expect_cmd = [
             mock.call(*self.testData.SNAP_LIST_CMD(), poll=False),
-            mock.call(*self.testData.LUN_CREATION_CMD(
-                'vol3-123456', 2, 'unit_test_pool', 'compressed', 'auto')),
             mock.call(*self.testData.ENABLE_COMPRESSION_CMD(1)),
-            mock.call(*self.testData.MIGRATION_CMD(),
-                      retry_disable=True,
-                      poll=True)]
+            mock.call(*self.testData.MODIFY_TIERING_CMD('vol3', 'auto'))
+        ]
         fake_cli.assert_has_calls(expect_cmd)
+
+        # Retype a thick volume to a compressed volume
+        self.driver.retype(None, self.testData.test_volume3,
+                           new_type_data, None, host_test_data)
+        fake_cli.assert_has_calls(expect_cmd)
+
+    @mock.patch(
+        "cinder.volume.drivers.emc.emc_vnx_cli.EMCVnxCliBase.get_lun_id",
+        mock.Mock(return_value=1))
+    @mock.patch(
+        "cinder.volume.drivers.emc.emc_vnx_cli.CommandLineHelper." +
+        "get_lun_by_name",
+        mock.Mock(return_value={'lun_id': 1}))
+    @mock.patch(
+        "eventlet.event.Event.wait",
+        mock.Mock(return_value=None))
+    @mock.patch(
+        "time.time",
+        mock.Mock(return_value=123456))
+    @mock.patch(
+        "cinder.volume.volume_types."
+        "get_volume_type_extra_specs",
+        mock.Mock(return_value={'provisioning:type': 'thin'}))
+    def test_retype_turn_on_compression_volume_has_snap(self):
+        """Unit test for retype a volume which has snap to compressed."""
+        new_type_data = {'name': 'voltype0', 'qos_specs_id': None,
+                         'deleted': False,
+                         'extra_specs': {'storagetype:provisioning':
+                                         'compressed'},
+                         'id': 'f82f28c8-148b-416e-b1ae-32d3c02556c0'}
+
+        host_test_data = {'host': 'host@backendsec#unit_test_pool',
+                          'capabilities':
+                          {'location_info': 'unit_test_pool|FNM00124500890',
+                           'volume_backend_name': 'pool_backend_1',
+                           'storage_protocol': 'iSCSI'}}
+        commands = [self.testData.NDU_LIST_CMD,
+                    self.testData.SNAP_LIST_CMD()]
+        results = [self.testData.NDU_LIST_RESULT,
+                   ('Has snap', 0)]
+        self.driverSetup(commands, results)
+        self.driver.cli.enablers = ['-Compression',
+                                    '-Deduplication',
+                                    '-ThinProvisioning',
+                                    '-FAST']
+        emc_vnx_cli.CommandLineHelper.get_array_serial = mock.Mock(
+            return_value={'array_serial': "FNM00124500890"})
+        # Retype a thin volume which has a snap to a compressed volume
+        retyped = self.driver.retype(None, self.testData.test_volume3,
+                                     new_type_data, None, host_test_data)
+        self.assertFalse(retyped,
+                         "Retype should failed due to "
+                         "the volume has snapshot")
 
     @mock.patch(
         "cinder.volume.drivers.emc.emc_vnx_cli.EMCVnxCliBase.get_lun_id",
@@ -3705,11 +3749,9 @@ Time Remaining:  0 second(s)
     def test_add_volume_to_cg(self):
         commands = [self.testData.LUN_PROPERTY_ALL_CMD('vol1'),
                     self.testData.ADD_LUN_TO_CG_CMD('cg_id', 1),
-                    self.testData.GET_CG_BY_NAME_CMD('cg_id')
                     ]
         results = [self.testData.LUN_PROPERTY('vol1', True),
-                   SUCCEED,
-                   self.testData.CG_PROPERTY('cg_id')]
+                   SUCCEED]
         fake_cli = self.driverSetup(commands, results)
 
         self.driver.create_volume(self.testData.test_volume_cg)
@@ -3881,9 +3923,9 @@ Time Remaining:  0 second(s)
     def test_create_consistencygroup_from_cgsnapshot(self):
         output_migrate_verify = ('The specified source LUN '
                                  'is not currently migrating.', 23)
-        new_cg = self.testData.test_cg.copy()
-        new_cg.update(
-            {'id': 'new_cg_id'})
+        new_cg = fake_consistencygroup.fake_consistencyobject_obj(
+            None, **self.testData.test_cg)
+        new_cg.id = 'new_cg_id'
         vol1_in_new_cg = self.testData.test_volume_cg.copy()
         vol1_in_new_cg.update(
             {'name': 'vol1_in_cg',
@@ -3899,18 +3941,24 @@ Time Remaining:  0 second(s)
         src_cgsnap = self.testData.test_cgsnapshot
         snap1_in_src_cgsnap = self.testData.test_member_cgsnapshot.copy()
         snap1_in_src_cgsnap.update(
-            {'volume': self.testData.test_volume,
-             'volume_name': 'src_vol1'})
+            {'volume': fake_volume.fake_volume_obj(
+             None, **self.testData.test_volume),
+             'expected_attrs': ['volume']})
+        snap1_in_src_cgsnap = fake_snapshot.fake_snapshot_obj(
+            None, **snap1_in_src_cgsnap)
         snap2_in_src_cgsnap = self.testData.test_member_cgsnapshot.copy()
         snap2_in_src_cgsnap.update(
-            {'volume': self.testData.test_volume2,
-             'volume_name': 'src_vol2'})
+            {'volume': fake_volume.fake_volume_obj(
+             None, **self.testData.test_volume2),
+             'expected_attrs': ['volume']})
+        snap2_in_src_cgsnap = fake_snapshot.fake_snapshot_obj(
+            None, **snap2_in_src_cgsnap)
         copied_snap_name = 'temp_snapshot_for_%s' % new_cg['id']
         td = self.testData
         commands = [td.SNAP_COPY_CMD(src_cgsnap['id'], copied_snap_name),
                     td.ALLOW_READWRITE_ON_SNAP_CMD(copied_snap_name),
                     td.SNAP_MP_CREATE_CMD(vol1_in_new_cg['name'],
-                                          snap1_in_src_cgsnap['volume_name']),
+                                          snap1_in_src_cgsnap.volume_name),
                     td.SNAP_ATTACH_CMD(vol1_in_new_cg['name'],
                                        copied_snap_name),
                     td.LUN_CREATION_CMD(vol1_in_new_cg['name'] + '_dest',
@@ -3921,7 +3969,7 @@ Time Remaining:  0 second(s)
                     td.MIGRATION_CMD(6231, 1),
 
                     td.SNAP_MP_CREATE_CMD(vol2_in_new_cg['name'],
-                                          snap2_in_src_cgsnap['volume_name']),
+                                          snap2_in_src_cgsnap.volume_name),
                     td.SNAP_ATTACH_CMD(vol2_in_new_cg['name'],
                                        copied_snap_name),
                     td.LUN_CREATION_CMD(vol2_in_new_cg['name'] + '_dest',
@@ -3965,7 +4013,7 @@ Time Remaining:  0 second(s)
             mock.call(*td.SNAP_COPY_CMD(src_cgsnap['id'], copied_snap_name)),
             mock.call(*td.ALLOW_READWRITE_ON_SNAP_CMD(copied_snap_name)),
             mock.call(*td.SNAP_MP_CREATE_CMD(vol1_in_new_cg['name'],
-                      snap1_in_src_cgsnap['volume_name']),
+                      snap1_in_src_cgsnap.volume_name),
                       poll=False),
             mock.call(*td.LUN_PROPERTY_ALL_CMD(vol1_in_new_cg['name']),
                       poll=True),
@@ -3981,7 +4029,7 @@ Time Remaining:  0 second(s)
             mock.call(*td.MIGRATION_CMD(6231, 1),
                       poll=True, retry_disable=True),
             mock.call(*td.SNAP_MP_CREATE_CMD(vol2_in_new_cg['name'],
-                      snap2_in_src_cgsnap['volume_name']),
+                      snap2_in_src_cgsnap.volume_name),
                       poll=False),
             mock.call(*td.LUN_PROPERTY_ALL_CMD(vol2_in_new_cg['name']),
                       poll=True),
@@ -4003,33 +4051,56 @@ Time Remaining:  0 second(s)
             mock.call(*td.DELETE_CG_SNAPSHOT(copied_snap_name))]
         self.assertEqual(expect_cmd, fake_cli.call_args_list)
 
-    def test_create_consistencygroup_from_othersource(self):
-        new_cg = self.testData.test_cg.copy()
-        new_cg.update(
-            {'id': 'new_cg_id'})
-        vol1_in_new_cg = self.testData.test_volume_cg.copy()
-        vol1_in_new_cg.update(
-            {'name': 'vol1_in_cg',
-             'id': '111111',
-             'consistencygroup_id': 'new_cg_id',
-             'provider_location': None})
-        vol2_in_new_cg = self.testData.test_volume_cg.copy()
-        vol2_in_new_cg.update(
-            {'name': 'vol2_in_cg',
-             'id': '222222',
-             'consistencygroup_id': 'new_cg_id',
-             'provider_location': None})
+    def test_create_cg_from_src_failed_without_source(self):
+        new_cg = fake_consistencygroup.fake_consistencyobject_obj(
+            None, **self.testData.test_cg)
+        vol1_in_new_cg = self.testData.test_volume_cg
         self.driverSetup()
         self.assertRaises(
             exception.InvalidInput,
             self.driver.create_consistencygroup_from_src,
-            new_cg, [vol1_in_new_cg, vol2_in_new_cg],
+            new_cg, [vol1_in_new_cg],
             None, None, None, None)
 
+    def test_create_cg_from_src_failed_with_multiple_sources(self):
+        new_cg = fake_consistencygroup.fake_consistencyobject_obj(
+            None, **self.testData.test_cg)
+        vol1_in_new_cg = self.testData.test_volume_cg
+        src_cgsnap = self.testData.test_cgsnapshot
+        snap1_in_src_cgsnap = fake_snapshot.fake_snapshot_obj(
+            None, **self.testData.test_member_cgsnapshot)
+        src_cg = fake_consistencygroup.fake_consistencyobject_obj(
+            None, **self.testData.test_cg)
+        src_cg.id = 'fake_source_cg'
+        vol1_in_src_cg = {'id': 'fake_volume',
+                          'consistencygroup_id': src_cg.id}
+        self.driverSetup()
+        self.assertRaises(
+            exception.InvalidInput,
+            self.driver.create_consistencygroup_from_src,
+            new_cg, [vol1_in_new_cg],
+            src_cgsnap, [snap1_in_src_cgsnap], src_cg, [vol1_in_src_cg])
+
+    def test_create_cg_from_src_failed_with_invalid_source(self):
+        new_cg = fake_consistencygroup.fake_consistencyobject_obj(
+            None, **self.testData.test_cg)
+        src_cgsnap = self.testData.test_cgsnapshot
+        vol1_in_new_cg = self.testData.test_volume_cg
+
+        src_cg = fake_consistencygroup.fake_consistencyobject_obj(
+            None, **self.testData.test_cg)
+        src_cg.id = 'fake_source_cg'
+        self.driverSetup()
+        self.assertRaises(
+            exception.InvalidInput,
+            self.driver.create_consistencygroup_from_src,
+            new_cg, [vol1_in_new_cg],
+            src_cgsnap, None, src_cg, None)
+
     def test_create_cg_from_cgsnapshot_migrate_failed(self):
-        new_cg = self.testData.test_cg.copy()
-        new_cg.update(
-            {'id': 'new_cg_id'})
+        new_cg = fake_consistencygroup.fake_consistencyobject_obj(
+            None, **self.testData.test_cg)
+        new_cg.id = 'new_cg_id'
         vol1_in_new_cg = self.testData.test_volume_cg.copy()
         vol1_in_new_cg.update(
             {'name': 'vol1_in_cg',
@@ -4045,12 +4116,18 @@ Time Remaining:  0 second(s)
         src_cgsnap = self.testData.test_cgsnapshot
         snap1_in_src_cgsnap = self.testData.test_member_cgsnapshot.copy()
         snap1_in_src_cgsnap.update(
-            {'volume': self.testData.test_volume,
-             'volume_name': 'src_vol1'})
+            {'volume': fake_volume.fake_volume_obj(
+             None, **self.testData.test_volume),
+             'expected_attrs': ['volume']})
+        snap1_in_src_cgsnap = fake_snapshot.fake_snapshot_obj(
+            None, **snap1_in_src_cgsnap)
         snap2_in_src_cgsnap = self.testData.test_member_cgsnapshot.copy()
         snap2_in_src_cgsnap.update(
-            {'volume': self.testData.test_volume2,
-             'volume_name': 'src_vol2'})
+            {'volume': fake_volume.fake_volume_obj(
+             None, **self.testData.test_volume2),
+             'expected_attrs': ['volume']})
+        snap2_in_src_cgsnap = fake_snapshot.fake_snapshot_obj(
+            None, **snap2_in_src_cgsnap)
         copied_snap_name = 'temp_snapshot_for_%s' % new_cg['id']
         td = self.testData
         commands = [td.LUN_PROPERTY_ALL_CMD(vol1_in_new_cg['name'] + '_dest'),
@@ -4087,6 +4164,154 @@ Time Remaining:  0 second(s)
             mock.call(*self.testData.LUN_DELETE_CMD(vol1_in_new_cg['name'])),
             mock.call(*td.SNAP_DELETE_CMD(copied_snap_name), poll=True)]
         fake_cli.assert_has_calls(expect_cmd)
+
+    def test_create_consistencygroup_from_cg(self):
+        output_migrate_verify = ('The specified source LUN '
+                                 'is not currently migrating.', 23)
+        new_cg = fake_consistencygroup.fake_consistencyobject_obj(
+            None, **self.testData.test_cg)
+        new_cg.id = 'new_cg_id'
+        vol1_in_new_cg = self.testData.test_volume_cg.copy()
+        vol1_in_new_cg.update(
+            {'name': 'vol1_in_cg',
+             'id': '111111',
+             'consistencygroup_id': 'new_cg_id',
+             'provider_location': None})
+        vol2_in_new_cg = self.testData.test_volume_cg.copy()
+        vol2_in_new_cg.update(
+            {'name': 'vol2_in_cg',
+             'id': '222222',
+             'consistencygroup_id': 'new_cg_id',
+             'provider_location': None})
+        src_cg = fake_consistencygroup.fake_consistencyobject_obj(
+            None, **self.testData.test_cg)
+        src_cg.id = 'src_cg_id'
+        vol1_in_src_cg = self.testData.test_volume_cg.copy()
+        vol1_in_src_cg.update(
+            {'name': 'vol1_in_src_cg',
+             'id': '111110000',
+             'consistencygroup_id': 'src_cg_id',
+             'provider_location': None})
+        vol2_in_src_cg = self.testData.test_volume_cg.copy()
+        vol2_in_src_cg.update(
+            {'name': 'vol2_in_src_cg',
+             'id': '222220000',
+             'consistencygroup_id': 'src_cg_id',
+             'provider_location': None})
+        temp_snap_name = 'temp_snapshot_for_%s' % new_cg['id']
+        td = self.testData
+        commands = [td.CREATE_CG_SNAPSHOT(src_cg['id'], temp_snap_name),
+                    td.SNAP_MP_CREATE_CMD(vol1_in_new_cg['name'],
+                                          vol1_in_src_cg['name']),
+                    td.SNAP_ATTACH_CMD(vol1_in_new_cg['name'],
+                                       temp_snap_name),
+                    td.LUN_CREATION_CMD(vol1_in_new_cg['name'] + '_dest',
+                                        vol1_in_new_cg['size'],
+                                        'unit_test_pool', 'thin', None),
+                    td.LUN_PROPERTY_ALL_CMD(vol1_in_new_cg['name'] + '_dest'),
+                    td.LUN_PROPERTY_ALL_CMD(vol1_in_new_cg['name']),
+                    td.MIGRATION_CMD(6231, 1),
+
+                    td.SNAP_MP_CREATE_CMD(vol2_in_new_cg['name'],
+                                          vol2_in_src_cg['name']),
+                    td.SNAP_ATTACH_CMD(vol2_in_new_cg['name'],
+                                       temp_snap_name),
+                    td.LUN_CREATION_CMD(vol2_in_new_cg['name'] + '_dest',
+                                        vol2_in_new_cg['size'],
+                                        'unit_test_pool', 'thin', None),
+                    td.LUN_PROPERTY_ALL_CMD(vol2_in_new_cg['name'] + '_dest'),
+                    td.LUN_PROPERTY_ALL_CMD(vol2_in_new_cg['name']),
+                    td.MIGRATION_CMD(6232, 2),
+
+                    td.MIGRATION_VERIFY_CMD(6231),
+                    td.MIGRATION_VERIFY_CMD(6232),
+                    td.CREATE_CONSISTENCYGROUP_CMD(new_cg['id'], [6231, 6232]),
+                    td.DELETE_CG_SNAPSHOT(temp_snap_name)
+                    ]
+        results = [SUCCEED, SUCCEED, SUCCEED, SUCCEED,
+                   td.LUN_PROPERTY(vol1_in_new_cg['name'] + '_dest',
+                                   lunid=1),
+                   td.LUN_PROPERTY(vol1_in_new_cg['name'], lunid=6231),
+                   SUCCEED, SUCCEED, SUCCEED, SUCCEED,
+                   td.LUN_PROPERTY(vol2_in_new_cg['name'] + '_dest',
+                                   lunid=2),
+                   td.LUN_PROPERTY(vol2_in_new_cg['name'], lunid=6232),
+                   SUCCEED, output_migrate_verify, output_migrate_verify,
+                   SUCCEED, SUCCEED]
+
+        fake_cli = self.driverSetup(commands, results)
+
+        cg_model_update, volumes_model_update = (
+            self.driver.create_consistencygroup_from_src(
+                None, new_cg, [vol1_in_new_cg, vol2_in_new_cg],
+                cgsnapshot=None, snapshots=None,
+                source_cg=src_cg, source_vols=[vol1_in_src_cg,
+                                               vol2_in_src_cg]))
+        self.assertEqual(2, len(volumes_model_update))
+        self.assertTrue('id^%s' % 6231 in
+                        volumes_model_update[0]['provider_location'])
+        self.assertTrue('id^%s' % 6232 in
+                        volumes_model_update[1]['provider_location'])
+
+        delete_temp_snap_cmd = [
+            mock.call(*td.DELETE_CG_SNAPSHOT(temp_snap_name))]
+        fake_cli.assert_has_calls(delete_temp_snap_cmd)
+
+    @mock.patch.object(emc_vnx_cli, 'LOG')
+    @mock.patch.object(emc_vnx_cli.CommandLineHelper,
+                       'delete_cgsnapshot')
+    def test_delete_temp_cgsnapshot_failed_will_not_raise_exception(
+            self, mock_delete_cgsnapshot, mock_logger):
+        temp_snap_name = 'fake_temp'
+        self.driverSetup()
+        mock_delete_cgsnapshot.side_effect = exception.EMCVnxCLICmdError(
+            cmd='fake_cmd', rc=200, out='fake_output')
+        self.driver.cli._delete_temp_cgsnap(temp_snap_name)
+        mock_delete_cgsnapshot.assert_called_once_with(temp_snap_name)
+        self.assertTrue(mock_logger.warning.called)
+
+    @mock.patch.object(emc_vnx_cli.CreateSMPTask, 'execute',
+                       mock.Mock(side_effect=exception.EMCVnxCLICmdError(
+                           cmd='fake_cmd', rc=20, out='fake_output')))
+    @mock.patch.object(emc_vnx_cli.CreateSMPTask, 'revert',
+                       mock.Mock())
+    def test_create_consistencygroup_from_cg_roll_back(self):
+        new_cg = fake_consistencygroup.fake_consistencyobject_obj(
+            None, **self.testData.test_cg)
+        new_cg.id = 'new_cg_id'
+        vol1_in_new_cg = self.testData.test_volume_cg.copy()
+        vol1_in_new_cg.update(
+            {'name': 'vol1_in_cg',
+             'id': '111111',
+             'consistencygroup_id': 'new_cg_id',
+             'provider_location': None})
+        src_cg = fake_consistencygroup.fake_consistencyobject_obj(
+            None, **self.testData.test_cg)
+        src_cg.id = 'src_cg_id'
+        vol1_in_src_cg = self.testData.test_volume_cg.copy()
+        vol1_in_src_cg.update(
+            {'name': 'vol1_in_src_cg',
+             'id': '111110000',
+             'consistencygroup_id': 'src_cg_id',
+             'provider_location': None})
+        temp_snap_name = 'temp_snapshot_for_%s' % new_cg['id']
+        td = self.testData
+        commands = [td.CREATE_CG_SNAPSHOT(src_cg['id'], temp_snap_name),
+                    td.DELETE_CG_SNAPSHOT(temp_snap_name)]
+        results = [SUCCEED, SUCCEED]
+
+        fake_cli = self.driverSetup(commands, results)
+
+        self.assertRaises(
+            exception.EMCVnxCLICmdError,
+            self.driver.create_consistencygroup_from_src,
+            None, new_cg, [vol1_in_new_cg],
+            cgsnapshot=None, snapshots=None,
+            source_cg=src_cg, source_vols=[vol1_in_src_cg])
+
+        rollback_cmd = [
+            mock.call(*td.DELETE_CG_SNAPSHOT(temp_snap_name))]
+        fake_cli.assert_has_calls(rollback_cmd)
 
     def test_deregister_initiator(self):
         fake_cli = self.driverSetup()

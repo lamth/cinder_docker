@@ -48,11 +48,6 @@ from cinder.zonemanager import utils as fczm_utils
 LOG = logging.getLogger(__name__)
 
 CONF = cfg.CONF
-CONF.register_opts(na_opts.netapp_basicauth_opts)
-CONF.register_opts(na_opts.netapp_connection_opts)
-CONF.register_opts(na_opts.netapp_eseries_opts)
-CONF.register_opts(na_opts.netapp_transport_opts)
-CONF.register_opts(na_opts.netapp_san_opts)
 
 
 @six.add_metaclass(cinder_utils.TraceWrapperMetaclass)
@@ -428,6 +423,26 @@ class NetAppESeriesLibrary(object):
         except exception.NetAppDriverException as e:
             with excutils.save_and_reraise_exception():
                 LOG.error(_LE("Error creating volume. Msg - %s."), e)
+                # There was some kind failure creating the volume, make sure no
+                # partial flawed work exists
+                try:
+                    bad_vol = self._get_volume(eseries_volume_label)
+                except Exception:
+                    # Swallowing the exception intentionally because this is
+                    # emergency cleanup to make sure no intermediate volumes
+                    # were left. In this whole error situation, the more
+                    # common route would be for no volume to have been created.
+                    pass
+                else:
+                    # Some sort of partial volume was created despite the
+                    # error.  Lets clean it out so no partial state volumes or
+                    # orphans are left.
+                    try:
+                        self._client.delete_volume(bad_vol["id"])
+                    except exception.NetAppDriverException as e2:
+                        LOG.error(_LE(
+                            "Error cleaning up failed volume creation.  "
+                            "Msg - %s."), e2)
 
         return vol
 

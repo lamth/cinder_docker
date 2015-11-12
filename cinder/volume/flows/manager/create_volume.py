@@ -213,7 +213,8 @@ class ExtractVolumeRefTask(flow_utils.CinderTask):
         if isinstance(result, ft.Failure) or not self.set_error:
             return
 
-        common.error_out_volume(context, self.db, volume_id)
+        reason = _('Volume create failed while extracting volume ref.')
+        common.error_out_volume(context, self.db, volume_id, reason=reason)
         LOG.error(_LE("Volume %s: create failed"), volume_id)
 
 
@@ -772,9 +773,9 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
                 # Update the newly created volume db entry before we clone it
                 # for the image-volume creation.
                 if model_update:
-                        volume_ref = self.db.volume_update(context,
-                                                           volume_ref['id'],
-                                                           model_update)
+                    volume_ref = self.db.volume_update(context,
+                                                       volume_ref['id'],
+                                                       model_update)
                 self.manager._create_image_cache_volume_entry(internal_context,
                                                               volume_ref,
                                                               image_id,
@@ -806,8 +807,8 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
         # we can't do anything if the driver didn't init
         if not self.driver.initialized:
             driver_name = self.driver.__class__.__name__
-            LOG.exception(_LE("Unable to create volume. "
-                              "Volume driver %s not initialized"), driver_name)
+            LOG.error(_LE("Unable to create volume. "
+                          "Volume driver %s not initialized"), driver_name)
             raise exception.DriverNotInitialized()
 
         create_type = volume_spec.pop('type', None)

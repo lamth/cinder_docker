@@ -23,7 +23,6 @@ import warnings
 
 from oslo_config import cfg
 from oslo_log import log as logging
-from oslo_utils import importutils
 from oslo_utils import timeutils
 from oslo_utils import units
 import requests
@@ -51,11 +50,16 @@ sf_opts = [
                 help='Allow tenants to specify QOS on create'),
 
     cfg.StrOpt('sf_account_prefix',
-               default=None,
                help='Create SolidFire accounts with this prefix. Any string '
                     'can be used here, but the string \"hostname\" is special '
                     'and will create a prefix using the cinder node hostname '
                     '(previous default behavior).  The default is NO prefix.'),
+
+    cfg.StrOpt('sf_volume_prefix',
+               default='UUID-',
+               help='Create SolidFire volumes with this prefix. Volume names '
+                    'are of the form <sf_volume_prefix><cinder-volume-id>.  '
+                    'The default is to use a prefix of \'UUID-\'.'),
 
     cfg.StrOpt('sf_template_account_name',
                default='openstack-vtemplate',
@@ -69,7 +73,6 @@ sf_opts = [
                      'glance and qemu-conversion on subsequent calls.'),
 
     cfg.StrOpt('sf_svip',
-               default=None,
                help='Overrides default cluster SVIP with the one specified. '
                     'This is required or deployments that have implemented '
                     'the use of VLANs for iSCSI networks in their cloud.'),
@@ -177,12 +180,12 @@ class SolidFireDriver(san.SanISCSIDriver):
         if self.configuration.sf_allow_template_caching:
             account = self.configuration.sf_template_account_name
             self.template_account_id = self._create_template_account(account)
-        self.target_driver = (
-            importutils.import_object(
-                'cinder.volume.drivers.solidfire.SolidFireISCSI',
-                solidfire_driver=self,
-                configuration=self.configuration))
+        self.target_driver = SolidFireISCSI(solidfire_driver=self,
+                                            configuration=self.configuration)
         self._set_cluster_uuid()
+
+    def __getattr__(self, attr):
+        return getattr(self.target_driver, attr)
 
     def _set_cluster_uuid(self):
         self.cluster_uuid = (
@@ -212,7 +215,7 @@ class SolidFireDriver(san.SanISCSIDriver):
         sf_snaps = self._issue_api_request(
             'ListSnapshots', {}, version='6.0')['result']['snapshots']
         for s in srefs:
-            seek_name = 'UUID-%s' % s['id']
+            seek_name = '%s%s' % (self.configuration.sf_volume_prefix, s['id'])
             sfsnap = next(
                 (ss for ss in sf_snaps if ss['name'] == seek_name), None)
             if sfsnap:
@@ -230,7 +233,7 @@ class SolidFireDriver(san.SanISCSIDriver):
                                           {})['result']['volumes']
         self.volume_map = {}
         for v in vrefs:
-            seek_name = 'UUID-%s' % v['id']
+            seek_name = '%s%s' % (self.configuration.sf_volume_prefix, v['id'])
             sfvol = next(
                 (sv for sv in sf_vols if sv['name'] == seek_name), None)
             if sfvol:
@@ -455,7 +458,8 @@ class SolidFireDriver(san.SanISCSIDriver):
                         'and secondary SolidFire accounts')
                 raise exception.SolidFireDriverException(msg)
 
-        params = {'name': 'UUID-%s' % vref['id'],
+        params = {'name': '%s%s' % (self.configuration.sf_volume_prefix,
+                                    vref['id']),
                   'newAccountID': sf_account['accountID']}
 
         # NOTE(jdg): First check the SF snapshots
@@ -463,7 +467,7 @@ class SolidFireDriver(san.SanISCSIDriver):
         # volumes.  This may be a running system that was updated from
         # before we did snapshots, so need to check both
         is_clone = False
-        snap_name = 'UUID-%s' % src_uuid
+        snap_name = '%s%s' % (self.configuration.sf_volume_prefix, src_uuid)
         snaps = self._get_sf_snapshots()
         snap = next((s for s in snaps if s["name"] == snap_name), None)
         if snap:
@@ -907,7 +911,8 @@ class SolidFireDriver(san.SanISCSIDriver):
         else:
             sf_account = self._get_account_create_availability(sf_accounts)
 
-        params = {'name': 'UUID-%s' % volume['id'],
+        vname = '%s%s' % (self.configuration.sf_volume_prefix, volume['id'])
+        params = {'name': vname,
                   'accountID': sf_account['accountID'],
                   'sliceCount': slice_count,
                   'totalSize': int(volume['size'] * units.Gi),
@@ -920,7 +925,8 @@ class SolidFireDriver(san.SanISCSIDriver):
         migration_status = volume.get('migration_status', None)
         if migration_status and 'target' in migration_status:
             k, v = migration_status.split(':')
-            params['name'] = 'UUID-%s' % v
+            vname = '%s%s' % (self.configuration.sf_volume_prefix, v)
+            params['name'] = vname
             params['attributes']['migration_uuid'] = volume['id']
             params['attributes']['uuid'] = v
         return self._do_volume_create(sf_account, params)
@@ -968,7 +974,8 @@ class SolidFireDriver(san.SanISCSIDriver):
 
     def delete_snapshot(self, snapshot):
         """Delete the specified snapshot from the SolidFire cluster."""
-        sf_snap_name = 'UUID-%s' % snapshot['id']
+        sf_snap_name = '%s%s' % (self.configuration.sf_volume_prefix,
+                                 snapshot['id'])
         accounts = self._get_sfaccounts_for_tenant(snapshot['project_id'])
         snap = None
         for acct in accounts:
@@ -1001,8 +1008,8 @@ class SolidFireDriver(san.SanISCSIDriver):
         if sf_vol is None:
             raise exception.VolumeNotFound(volume_id=snapshot['volume_id'])
         params = {'volumeID': sf_vol['volumeID'],
-                  'name': 'UUID-%s' % snapshot['id']}
-
+                  'name': '%s%s' % (self.configuration.sf_volume_prefix,
+                                    snapshot['id'])}
         return self._do_snapshot_create(params)
 
     def create_volume_from_snapshot(self, volume, snapshot):
@@ -1290,42 +1297,17 @@ class SolidFireDriver(san.SanISCSIDriver):
         self._issue_api_request('ModifyVolume',
                                 params, version='5.0')
 
-    # #### Interface methods for transport layer #### #
-
-    # TODO(jdg): SolidFire can mix and do iSCSI and FC on the
-    # same cluster, we'll modify these later to check based on
-    # the volume info if we need an FC target driver or an
-    # iSCSI target driver
-    def ensure_export(self, context, volume):
-        return self.target_driver.ensure_export(context, volume, None)
-
-    def create_export(self, context, volume, connector):
-        return self.target_driver.create_export(
-            context,
-            volume,
-            None)
-
-    def remove_export(self, context, volume):
-        return self.target_driver.remove_export(context, volume)
-
-    def initialize_connection(self, volume, connector):
-        return self.target_driver.initialize_connection(volume, connector)
-
-    def validate_connector(self, connector):
-        return self.target_driver.validate_connector(connector)
-
-    def terminate_connection(self, volume, connector, **kwargs):
-        return self.target_driver.terminate_connection(volume, connector,
-                                                       **kwargs)
-
 
 class SolidFireISCSI(iscsi_driver.SanISCSITarget):
     def __init__(self, *args, **kwargs):
         super(SolidFireISCSI, self).__init__(*args, **kwargs)
         self.sf_driver = kwargs.get('solidfire_driver')
 
+    def __getattr__(self, attr):
+        return getattr(self.sf_driver, attr)
+
     def _do_iscsi_export(self, volume):
-        sfaccount = self.sf_driver._get_sfaccount(volume['project_id'])
+        sfaccount = self._get_sfaccount(volume['project_id'])
         model_update = {}
         model_update['provider_auth'] = ('CHAP %s %s'
                                          % (sfaccount['username'],

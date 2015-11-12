@@ -8,9 +8,9 @@
 # OpenStack Infra <zanata@openstack.org>, 2015. #zanata
 msgid ""
 msgstr ""
-"Project-Id-Version: cinder 7.0.1.dev5\n"
+"Project-Id-Version: cinder 8.0.0.dev66\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2015-10-23 06:07+0000\n"
+"POT-Creation-Date: 2015-10-22 06:07+0000\n"
 "PO-Revision-Date: 2015-09-16 08:22+0000\n"
 "Last-Translator: Andreas Jaeger <jaegerandi@gmail.com>\n"
 "Language-Team: Turkish (Turkey)\n"
@@ -1321,14 +1321,6 @@ msgid "Failed to load osapi_volume"
 msgstr "osapi_volume yükleme başarısız"
 
 #, python-format
-msgid "Failed to open config for %(vol_id)s: %(e)s"
-msgstr "%(vol_id)s için yapılandırma açılamadı: %(e)s"
-
-#, python-format
-msgid "Failed to open config for %s."
-msgstr "%s için yapılandırma açılamadı."
-
-#, python-format
 msgid "Failed to open iet session list for %s"
 msgstr "%s için iet oturum listesi açılamadı"
 
@@ -2434,9 +2426,6 @@ msgstr ""
 #, python-format
 msgid "XML exception reading parameter: %s"
 msgstr "XML okuma parametresi istisnası: %s"
-
-msgid "You must set your iscsi_ip_address in cinder.conf."
-msgstr "cinder.conf dosyasında iscsi_ip_address bilgisini ayarlamalısınız."
 
 msgid "_find_mappings: volume is not active"
 msgstr "_find_mappings: mantıksal sürücü etkin değil"

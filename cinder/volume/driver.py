@@ -20,6 +20,7 @@ import time
 
 from oslo_concurrency import processutils
 from oslo_config import cfg
+from oslo_config import types
 from oslo_log import log as logging
 from oslo_utils import excutils
 import six
@@ -66,7 +67,6 @@ volume_opts = [
                help='The maximum number of times to rescan targets'
                     ' to find volume'),
     cfg.StrOpt('volume_backend_name',
-               default=None,
                help='The backend name for a given driver implementation'),
     cfg.BoolOpt('use_multipath_for_image_xfer',
                 default=False,
@@ -85,7 +85,6 @@ volume_opts = [
                default=0,
                help='Size in MiB to wipe at start of old volumes. 0 => all'),
     cfg.StrOpt('volume_clear_ionice',
-               default=None,
                help='The flag to pass to ionice to alter the i/o priority '
                     'of the process used to zero a volume after deletion, '
                     'for example "-c3" for idle only priority.'),
@@ -149,11 +148,9 @@ volume_opts = [
                     'with the value "iser". The supported iSCSI protocol '
                     'values are "iscsi" and "iser".'),
     cfg.StrOpt('driver_client_cert_key',
-               default=None,
                help='The path to the client certificate key for verification, '
                     'if the driver supports it.'),
     cfg.StrOpt('driver_client_cert',
-               default=None,
                help='The path to the client certificate for verification, '
                     'if the driver supports it.'),
     cfg.BoolOpt('driver_use_ssl',
@@ -172,7 +169,6 @@ volume_opts = [
                       'capacity. A ratio lower than 1.0 will be ignored and '
                       'the default value will be used instead.'),
     cfg.StrOpt('scst_target_iqn_name',
-               default=None,
                help='Certain ISCSI targets have predefined target names, '
                     'SCST target driver uses this name.'),
     cfg.StrOpt('scst_target_driver',
@@ -194,16 +190,13 @@ volume_opts = [
                deprecated_opts=deprecated_chap_password_opts,
                secret=True),
     cfg.StrOpt('driver_data_namespace',
-               default=None,
                help='Namespace for driver private data values to be '
                     'saved in.'),
     cfg.StrOpt('filter_function',
-               default=None,
                help='String representation for an equation that will be '
                     'used to filter hosts. Only used when the driver '
                     'filter is set to be used by the Cinder scheduler.'),
     cfg.StrOpt('goodness_function',
-               default=None,
                help='String representation for an equation that will be '
                     'used to determine the goodness of a host. Only used '
                     'when using the goodness weigher is set to be used by '
@@ -213,24 +206,19 @@ volume_opts = [
                 help='If set to True the http client will validate the SSL '
                      'certificate of the backend endpoint.'),
     cfg.ListOpt('trace_flags',
-                default=None,
                 help='List of options that control which trace info '
                      'is written to the DEBUG log level to assist '
                      'developers. Valid values are method and api.'),
-    cfg.BoolOpt('managed_replication_target',
-                default=True,
-                help='There are two types of target configurations '
-                     'managed (replicate to another configured backend) '
-                     'or unmanaged (replicate to a device not managed '
-                     'by Cinder).'),
-    cfg.ListOpt('replication_devices',
-                default=None,
-                help="List of k/v pairs representing a replication target "
-                     "for this backend device.  For unmanaged the format "
-                     "is: {'key-1'='val1' 'key-2'='val2'...},{...} "
-                     "and for managed devices its simply a list of valid "
-                     "configured backend_names that the driver supports "
-                     "replicating to: backend-a,bakcend-b..."),
+    cfg.MultiOpt('replication_device',
+                 item_type=types.Dict(),
+                 help="Multi opt of dictionaries to represent a replication "
+                      "target device.  This option may be specified multiple "
+                      "times in a single config section to specify multiple "
+                      "replication target devices.  Each entry takes the "
+                      "standard dict config form: replication_device = "
+                      "device_target_id:<required>,"
+                      "managed_backend_name:<host@backend_name>,"
+                      "key1:value1,key2:value2..."),
     cfg.BoolOpt('image_upload_use_cinder_backend',
                 default=False,
                 help='If set to True, upload-to-image in raw format will '
@@ -325,6 +313,7 @@ class BaseVD(object):
 
         self._execute = execute
         self._stats = {}
+        self._throttle = None
 
         self.pools = []
         self.capabilities = {}
@@ -426,8 +415,8 @@ class BaseVD(object):
         # flag in the interface is for anticipation that it will be enabled
         # in the future.
         if remote:
-            LOG.exception(_LE("Detaching snapshot from a remote node "
-                              "is not supported."))
+            LOG.error(_LE("Detaching snapshot from a remote node "
+                          "is not supported."))
             raise exception.NotSupportedOperation(
                 operation=_("detach snapshot from remote node"))
         else:
@@ -994,8 +983,8 @@ class BaseVD(object):
         # flag in the interface is for anticipation that it will be enabled
         # in the future.
         if remote:
-            LOG.exception(_LE("Attaching snapshot from a remote node "
-                              "is not supported."))
+            LOG.error(_LE("Attaching snapshot from a remote node "
+                          "is not supported."))
             raise exception.NotSupportedOperation(
                 operation=_("attach snapshot from remote node"))
         else:
@@ -1261,7 +1250,8 @@ class BaseVD(object):
             self.create_cloned_volume(temp_vol_ref, volume)
         except Exception:
             with excutils.save_and_reraise_exception():
-                self.db.volume_destroy(context, temp_vol_ref['id'])
+                self.db.volume_destroy(context.elevated(),
+                                       temp_vol_ref['id'])
 
         self.db.volume_update(context, temp_vol_ref['id'],
                               {'status': 'available'})
@@ -1325,6 +1315,16 @@ class BaseVD(object):
 
     def retype(self, context, volume, new_type, diff, host):
         return False, None
+
+    def create_cloned_volume(self, volume, src_vref):
+        """Creates a clone of the specified volume.
+
+        If volume_type extra specs includes 'replication: <is> True' the
+        driver needs to create a volume replica (secondary)
+        and setup replication between the newly created volume
+        and the secondary volume.
+        """
+        raise NotImplementedError()
 
     # #######  Interface methods for DataPath (Connector) ########
     @abc.abstractmethod
@@ -1433,6 +1433,22 @@ class BaseVD(object):
         """
         return (False, None)
 
+    def manage_existing(self, volume, existing_ref):
+        """Manage exiting stub.
+
+        This is for drivers that don't implement manage_existing().
+        """
+        msg = _("Manage existing volume not implemented.")
+        raise NotImplementedError(msg)
+
+    def unmanage(self, volume):
+        """Unmanage stub.
+
+        This is for drivers that don't implement unmanage().
+        """
+        msg = _("Unmanage volume not implemented.")
+        raise NotImplementedError(msg)
+
 
 @six.add_metaclass(abc.ABCMeta)
 class LocalVD(object):
@@ -1485,21 +1501,6 @@ class ConsistencyGroupVD(object):
     @abc.abstractmethod
     def delete_consistencygroup(self, context, group):
         """Deletes a consistency group."""
-        return
-
-
-@six.add_metaclass(abc.ABCMeta)
-class CloneableVD(object):
-    @abc.abstractmethod
-    def create_cloned_volume(self, volume, src_vref):
-        """Creates a clone of the specified volume.
-
-        If volume_type extra specs includes 'replication: <is> True' the
-        driver needs to create a volume replica (secondary)
-        and setup replication between the newly created volume
-        and the secondary volume.
-        """
-
         return
 
 
@@ -1948,7 +1949,7 @@ class ReplicaVD(object):
 
 
 class VolumeDriver(ConsistencyGroupVD, TransferVD, ManageableVD, ExtendVD,
-                   CloneableVD, CloneableImageVD, ManageableSnapshotsVD,
+                   CloneableImageVD, ManageableSnapshotsVD,
                    SnapshotVD, ReplicaVD, LocalVD, MigrateVD, BaseVD):
     """This class will be deprecated soon.
 
@@ -1961,9 +1962,6 @@ class VolumeDriver(ConsistencyGroupVD, TransferVD, ManageableVD, ExtendVD,
         raise NotImplementedError()
 
     def create_volume_from_snapshot(self, volume, snapshot):
-        raise NotImplementedError()
-
-    def create_cloned_volume(self, volume, src_vref):
         raise NotImplementedError()
 
     def create_replica_test_volume(self, volume, src_vref):
@@ -2037,7 +2035,7 @@ class VolumeDriver(ConsistencyGroupVD, TransferVD, ManageableVD, ExtendVD,
     def remove_export_snapshot(self, context, snapshot):
         raise NotImplementedError()
 
-    def initialize_connection(self, volume, connector):
+    def initialize_connection(self, volume, connector, **kwargs):
         raise NotImplementedError()
 
     def initialize_connection_snapshot(self, snapshot, connector, **kwargs):

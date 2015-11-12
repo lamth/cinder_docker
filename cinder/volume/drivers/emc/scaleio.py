@@ -17,6 +17,7 @@ Driver for EMC ScaleIO based on ScaleIO remote CLI.
 """
 
 import base64
+import binascii
 import json
 
 from os_brick.initiator import connector
@@ -25,7 +26,7 @@ from oslo_log import log as logging
 from oslo_utils import units
 import requests
 import six
-import urllib
+from six.moves import urllib
 
 from cinder import context
 from cinder import exception
@@ -48,7 +49,6 @@ scaleio_opts = [
                 default=False,
                 help='Whether to verify server certificate.'),
     cfg.StrOpt('sio_server_certificate_path',
-               default=None,
                help='Server certificate path.'),
     cfg.BoolOpt('sio_round_volume_capacity',
                 default=True,
@@ -60,19 +60,14 @@ scaleio_opts = [
                 default=False,
                 help='Whether to unmap volume before deletion.'),
     cfg.StrOpt('sio_protection_domain_id',
-               default=None,
                help='Protection domain id.'),
     cfg.StrOpt('sio_protection_domain_name',
-               default=None,
                help='Protection domain name.'),
     cfg.StrOpt('sio_storage_pools',
-               default=None,
                help='Storage pools.'),
     cfg.StrOpt('sio_storage_pool_name',
-               default=None,
                help='Storage pool name.'),
     cfg.StrOpt('sio_storage_pool_id',
-               default=None,
                help='Storage pool id.')
 ]
 
@@ -122,8 +117,13 @@ class ScaleIODriver(driver.VolumeDriver):
              'user': self.server_username,
              'verify_cert': self.verify_server_certificate})
 
-        self.storage_pools = [e.strip() for e in
-                              self.configuration.sio_storage_pools.split(',')]
+        self.storage_pools = None
+        if self.configuration.sio_storage_pools:
+            self.storage_pools = [
+                e.strip() for e in
+                self.configuration.sio_storage_pools.split(',')
+            ]
+
         self.storage_pool_name = self.configuration.sio_storage_pool_name
         self.storage_pool_id = self.configuration.sio_storage_pool_id
         if self.storage_pool_name is None and self.storage_pool_id is None:
@@ -143,7 +143,7 @@ class ScaleIODriver(driver.VolumeDriver):
             {'domain_name': self.protection_domain_name})
         self.protection_domain_id = self.configuration.sio_protection_domain_id
         LOG.info(_LI(
-            "Protection domain name: %(domain_id)s."),
+            "Protection domain id: %(domain_id)s."),
             {'domain_id': self.protection_domain_id})
 
         self.connector = connector.InitiatorConnector.factory(
@@ -205,6 +205,12 @@ class ScaleIODriver(driver.VolumeDriver):
             msg = _("Must specify storage pool name or id.")
             raise exception.InvalidInput(reason=msg)
 
+        if not self.storage_pools:
+            msg = _(
+                "Must specify storage pools. Option: sio_storage_pools."
+            )
+            raise exception.InvalidInput(reason=msg)
+
     def _find_storage_pool_id_from_storage_type(self, storage_type):
         # Default to what was configured in configuration file if not defined.
         return storage_type.get(STORAGE_POOL_ID,
@@ -239,9 +245,14 @@ class ScaleIODriver(driver.VolumeDriver):
         name = six.text_type(id).replace("-", "")
         try:
             name = base64.b16decode(name.upper())
-        except TypeError:
+        except (TypeError, binascii.Error):
             pass
-        encoded_name = base64.b64encode(name)
+        encoded_name = name
+        if isinstance(encoded_name, six.text_type):
+            encoded_name = encoded_name.encode('utf-8')
+        encoded_name = base64.b64encode(encoded_name)
+        if six.PY3:
+            encoded_name = encoded_name.decode('ascii')
         LOG.debug(
             "Converted id %(id)s to scaleio name %(name)s.",
             {'id': id, 'name': encoded_name})
@@ -296,7 +307,8 @@ class ScaleIODriver(driver.VolumeDriver):
                         " protection domain id.")
                 raise exception.VolumeBackendAPIException(data=msg)
 
-            encoded_domain_name = urllib.quote(self.protection_domain_name, '')
+            domain_name = self.protection_domain_name
+            encoded_domain_name = urllib.parse.quote(domain_name, '')
             req_vars = {'server_ip': self.server_ip,
                         'server_port': self.server_port,
                         'encoded_domain_name': encoded_domain_name}
@@ -330,7 +342,7 @@ class ScaleIODriver(driver.VolumeDriver):
         pool_name = self.storage_pool_name
         pool_id = self.storage_pool_id
         if pool_name:
-            encoded_domain_name = urllib.quote(pool_name, '')
+            encoded_domain_name = urllib.parse.quote(pool_name, '')
             req_vars = {'server_ip': self.server_ip,
                         'server_port': self.server_port,
                         'domain_id': domain_id,
@@ -691,7 +703,7 @@ class ScaleIODriver(driver.VolumeDriver):
                       {'domain': domain_name,
                        'pool': pool_name})
             # Get domain id from name.
-            encoded_domain_name = urllib.quote(domain_name, '')
+            encoded_domain_name = urllib.parse.quote(domain_name, '')
             req_vars = {'server_ip': self.server_ip,
                         'server_port': self.server_port,
                         'encoded_domain_name': encoded_domain_name}
@@ -727,7 +739,7 @@ class ScaleIODriver(driver.VolumeDriver):
             LOG.info(_LI("Domain id is %s."), domain_id)
 
             # Get pool id from name.
-            encoded_pool_name = urllib.quote(pool_name, '')
+            encoded_pool_name = urllib.parse.quote(pool_name, '')
             req_vars = {'server_ip': self.server_ip,
                         'server_port': self.server_port,
                         'domain_id': domain_id,

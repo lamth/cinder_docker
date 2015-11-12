@@ -16,7 +16,7 @@
 
 """Handles all requests relating to volumes."""
 
-
+import ast
 import collections
 import datetime
 import functools
@@ -52,12 +52,13 @@ from cinder.volume import utils as volume_utils
 from cinder.volume import volume_types
 
 
-allow_force_upload = cfg.BoolOpt('enable_force_upload',
-                                 default=False,
-                                 help='Enables the Force option on '
-                                      'upload_to_image. This enables '
-                                      'running upload_volume on in-use '
-                                      'volumes for backends that support it.')
+allow_force_upload_opt = cfg.BoolOpt('enable_force_upload',
+                                     default=False,
+                                     help='Enables the Force option on '
+                                          'upload_to_image. This enables '
+                                          'running upload_volume on in-use '
+                                          'volumes for backends that '
+                                          'support it.')
 volume_host_opt = cfg.BoolOpt('snapshot_same_host',
                               default=True,
                               help='Create volume from snapshot at the host '
@@ -73,7 +74,7 @@ az_cache_time_opt = cfg.IntOpt('az_cache_duration',
                                     'seconds')
 
 CONF = cfg.CONF
-CONF.register_opt(allow_force_upload)
+CONF.register_opt(allow_force_upload_opt)
 CONF.register_opt(volume_host_opt)
 CONF.register_opt(volume_same_az_opt)
 CONF.register_opt(az_cache_time_opt)
@@ -112,6 +113,29 @@ def check_policy(context, action, target_obj=None):
 
     _action = 'volume:%s' % action
     cinder.policy.enforce(context, _action, target)
+
+
+def valid_replication_volume(func):
+    """Check that the volume is capable of replication.
+
+    This decorator requires the first 3 args of the wrapped function
+    to be (self, context, volume)
+    """
+    @functools.wraps(func)
+    def wrapped(self, context, volume, *args, **kwargs):
+        rep_capable = False
+        if volume.get('volume_type_id', None):
+            extra_specs = volume_types.get_volume_type_extra_specs(
+                volume.get('volume_type_id'))
+            rep_capable = extra_specs.get('replication_enabled',
+                                          False) == "<is> True"
+        if not rep_capable:
+            msg = _("Volume is not a replication enabled volume, "
+                    "replication operations can only be performed "
+                    "on volumes that are of type replication_enabled.")
+            raise exception.InvalidVolume(reason=msg)
+        return func(self, context, volume, *args, **kwargs)
+    return wrapped
 
 
 class API(base.Base):
@@ -409,7 +433,11 @@ class API(base.Base):
         # because the volume cannot be decrypted without its key.
         encryption_key_id = volume.get('encryption_key_id', None)
         if encryption_key_id is not None:
-            self.key_manager.delete_key(context, encryption_key_id)
+            try:
+                self.key_manager.delete_key(context, encryption_key_id)
+            except Exception as e:
+                msg = _("Unable to delete encrypted volume: %s.") % e.msg
+                raise exception.InvalidVolume(reason=msg)
 
         now = timeutils.utcnow()
         vref = self.db.volume_update(context,
@@ -797,7 +825,7 @@ class API(base.Base):
         except Exception:
             with excutils.save_and_reraise_exception():
                 try:
-                    if hasattr(snapshot, 'id'):
+                    if snapshot.obj_attr_is_set('id'):
                         snapshot.destroy()
                 finally:
                     QUOTAS.rollback(context, reservations)
@@ -1153,6 +1181,15 @@ class API(base.Base):
         LOG.info(_LI("Get volume image-metadata completed successfully."),
                  resource=volume)
         return {meta_entry.key: meta_entry.value for meta_entry in db_data}
+
+    def get_list_volumes_image_metadata(self, context, volume_id_list):
+        db_data = self.db.volume_glance_metadata_list_get(context,
+                                                          volume_id_list)
+        results = collections.defaultdict(dict)
+        for meta_entry in db_data:
+            results[meta_entry['volume_id']].update({meta_entry['key']:
+                                                     meta_entry['value']})
+        return results
 
     def _check_volume_availability(self, volume, force):
         """Check if the volume can be used."""
@@ -1561,8 +1598,8 @@ class API(base.Base):
                                  metadata=None):
         host = volume_utils.extract_host(volume['host'])
         try:
-            self.db.service_get_by_host_and_topic(
-                context.elevated(), host, CONF.volume_topic)
+            objects.Service.get_by_host_and_topic(context.elevated(), host,
+                                                  CONF.volume_topic)
         except exception.ServiceNotFound:
             with excutils.save_and_reraise_exception():
                 LOG.error(_LE('Unable to find service: %(service)s for '
@@ -1589,8 +1626,8 @@ class API(base.Base):
     # now they're a special resource, so no.
 
     @wrap_check_policy
+    @valid_replication_volume
     def enable_replication(self, ctxt, volume):
-
         # NOTE(jdg): details like sync vs async
         # and replica count are to be set via the
         # volume-type and config files.
@@ -1614,7 +1651,7 @@ class API(base.Base):
         if rep_status not in valid_rep_status:
             msg = (_("Invalid status to enable replication. "
                      "valid states are: %(valid_states)s, "
-                     "current replication-state is: %(curr_state)s."),
+                     "current replication-state is: %(curr_state)s.") %
                    {'valid_states': valid_rep_status,
                     'curr_state': rep_status})
 
@@ -1626,6 +1663,7 @@ class API(base.Base):
         self.volume_rpcapi.enable_replication(ctxt, vref)
 
     @wrap_check_policy
+    @valid_replication_volume
     def disable_replication(self, ctxt, volume):
 
         valid_disable_status = ['disabled', 'enabled']
@@ -1638,7 +1676,7 @@ class API(base.Base):
         if rep_status not in valid_disable_status:
             msg = (_("Invalid status to disable replication. "
                      "valid states are: %(valid_states)s, "
-                     "current replication-state is: %(curr_state)s."),
+                     "current replication-state is: %(curr_state)s.") %
                    {'valid_states': valid_disable_status,
                     'curr_state': rep_status})
 
@@ -1651,6 +1689,7 @@ class API(base.Base):
         self.volume_rpcapi.disable_replication(ctxt, vref)
 
     @wrap_check_policy
+    @valid_replication_volume
     def failover_replication(self,
                              ctxt,
                              volume,
@@ -1667,7 +1706,7 @@ class API(base.Base):
         if rep_status not in valid_failover_status:
             msg = (_("Invalid status to failover replication. "
                      "valid states are: %(valid_states)s, "
-                     "current replication-state is: %(curr_state)s."),
+                     "current replication-state is: %(curr_state)s.") %
                    {'valid_states': valid_failover_status,
                     'curr_state': rep_status})
 
@@ -1683,6 +1722,7 @@ class API(base.Base):
                                                 secondary)
 
     @wrap_check_policy
+    @valid_replication_volume
     def list_replication_targets(self, ctxt, volume):
 
         # NOTE(jdg): This collects info for the specified volume
@@ -1690,6 +1730,17 @@ class API(base.Base):
         # also, would be worth having something at a backend/host
         # level to show an admin how a backend is configured.
         return self.volume_rpcapi.list_replication_targets(ctxt, volume)
+
+    def check_volume_filters(self, filters):
+        booleans = self.db.get_booleans_for_table('volume')
+        for k, v in filters.iteritems():
+            try:
+                if k in booleans:
+                    filters[k] = bool(v)
+                else:
+                    filters[k] = ast.literal_eval(v)
+            except (ValueError, SyntaxError):
+                LOG.debug('Could not evaluate value %s, assuming string', v)
 
 
 class HostAPI(base.Base):

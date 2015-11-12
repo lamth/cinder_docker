@@ -124,8 +124,8 @@ class BackupManager(manager.SchedulerDependentManager):
                  host)
 
         if 'default' not in self.volume_managers:
-            # For multi-backend we just pick the top of the list.
-            return self.volume_managers.keys()[0]
+            # For multi-backend we just pick "first" from volume managers dict
+            return next(iter(self.volume_managers))
 
         return 'default'
 
@@ -281,14 +281,14 @@ class BackupManager(manager.SchedulerDependentManager):
         for attachment in attachments:
             if (attachment['attached_host'] == self.host and
                     attachment['instance_uuid'] is None):
-                        try:
-                            mgr.detach_volume(ctxt, volume['id'],
-                                              attachment['id'])
-                        except Exception:
-                            LOG.exception(_LE("Detach attachment %(attach_id)s"
-                                              " failed."),
-                                          {'attach_id': attachment['id']},
-                                          resource=volume)
+                try:
+                    mgr.detach_volume(ctxt, volume['id'],
+                                      attachment['id'])
+                except Exception:
+                    LOG.exception(_LE("Detach attachment %(attach_id)s"
+                                      " failed."),
+                                  {'attach_id': attachment['id']},
+                                  resource=volume)
 
     def _cleanup_temp_volumes_snapshots_for_one_backup(self, ctxt, backup):
         # NOTE(xyang): If the service crashes or gets restarted during the

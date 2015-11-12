@@ -666,6 +666,11 @@ def volume_glance_metadata_get(context, volume_id):
     return IMPL.volume_glance_metadata_get(context, volume_id)
 
 
+def volume_glance_metadata_list_get(context, volume_id_list):
+    """Return the glance metadata for a volume list."""
+    return IMPL.volume_glance_metadata_list_get(context, volume_id_list)
+
+
 def volume_snapshot_glance_metadata_get(context, snapshot_id):
     """Return the Glance metadata for the specified snapshot."""
     return IMPL.volume_snapshot_glance_metadata_get(context, snapshot_id)
@@ -722,9 +727,10 @@ def volume_glance_metadata_copy_from_volume_to_volume(context,
 ###################
 
 
-def quota_create(context, project_id, resource, limit):
+def quota_create(context, project_id, resource, limit, allocated=0):
     """Create a quota for the given project and resource."""
-    return IMPL.quota_create(context, project_id, resource, limit)
+    return IMPL.quota_create(context, project_id, resource, limit,
+                             allocated=allocated)
 
 
 def quota_get(context, project_id, resource):
@@ -1018,6 +1024,10 @@ def purge_deleted_rows(context, age_in_days):
     :returns: number of deleted rows
     """
     return IMPL.purge_deleted_rows(context, age_in_days=age_in_days)
+
+
+def get_booleans_for_table(table_name):
+    return IMPL.get_booleans_for_table(table_name)
 
 
 ###################
