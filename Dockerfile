@@ -15,6 +15,9 @@ RUN apt-get install -y libxslt-dev
 RUN pip install tox
 RUN pip install python-cinderclient
 
+# Initialize lvm
+RUN apt-get install -y lvm2
+
 # Get Cinder
 ADD . /usr/lib/cinder
 WORKDIR /usr/lib/cinder
@@ -34,6 +37,6 @@ RUN mv /etc/cinder/logging_sample.conf /etc/cinder/logging.conf
 
 RUN cinder-manage db sync
 
-EXPOSE 8779
+EXPOSE 8776
 
 CMD cinder-all
