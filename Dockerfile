@@ -22,7 +22,7 @@ RUN apt-get install -y lvm2
 ADD . /usr/lib/cinder
 WORKDIR /usr/lib/cinder
 
-# Build Keystone
+# Build Cinder
 RUN easy_install -U pip # For IncompleteRead
 RUN pip install -r requirements.txt
 RUN python setup.py install
